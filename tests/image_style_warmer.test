@@ -1,0 +1,178 @@
+<?php
+
+/**
+ * @file
+ * Tests for image_style_warmer.
+ */
+class ImageStyleWarmerTestCase extends BackdropWebTestCase {
+  protected $style;
+
+  public function setUp() {
+    parent::setUp('image_style_warmer');
+
+    $effect = image_effect_definition_load('image_scale');
+    $effect['data'] = array('width' => 40, 'height' => 40, 'upscale' => FALSE);
+
+    $this->style = image_style_save(array(
+      'name' => 'isw_test',
+      'label' => 'ISW Test',
+      'effects' => array($effect),
+    ));
+  }
+
+  protected function createPermanentImageFile() {
+    static $counter = 0;
+    $counter++;
+
+    $files = $this->backdropGetTestFiles('image');
+    $source = (array) reset($files);
+    // backdropGetTestFiles() always points at the same fixture uri; copy it
+    // so each call produces a distinct, uniquely-named managed file.
+    $destination = 'public://isw-test-' . $counter . '-' . basename($source['uri']);
+    $source['uri'] = file_unmanaged_copy($source['uri'], $destination);
+
+    $file = new File($source);
+    $file->status = 0;
+    file_save($file);
+    return $file;
+  }
+
+  public function testCreateDerivativeIsStreamAgnostic() {
+    $file = $this->createPermanentImageFile();
+    $file->status = FILE_STATUS_PERMANENT;
+    file_save($file);
+
+    $destination = image_style_path($this->style['name'], $file->uri);
+    $this->assertFalse(file_exists($destination), 'No derivative exists until something asks for one.');
+
+    $created = image_style_warmer_create_derivative($this->style, $file->uri);
+    $this->assertTrue($created, 'Derivative reported as created.');
+    $this->assertTrue(file_exists($destination), 'Derivative file exists at the style path for the uri scheme in use.');
+
+    // Skips regenerating by default.
+    $mtime = filemtime($destination);
+    sleep(1);
+    image_style_warmer_create_derivative($this->style, $file->uri);
+    $this->assertEqual(filemtime($destination), $mtime, 'Existing derivative left untouched without force.');
+
+    // Force regenerates it.
+    image_style_warmer_create_derivative($this->style, $file->uri, TRUE);
+    $this->assertNotEqual(filemtime($destination), $mtime, 'Forced rebuild regenerates an existing derivative.');
+  }
+
+  public function testWarmOnUploadAndQueue() {
+    config_set('image_style_warmer.settings', 'warm_on_upload', array($this->style['name']));
+
+    $file = $this->createPermanentImageFile();
+    $file->status = FILE_STATUS_PERMANENT;
+    file_save($file);
+
+    $destination = image_style_path($this->style['name'], $file->uri);
+    $this->assertTrue(file_exists($destination), 'Marking a file permanent with warm_on_upload configured generates the derivative immediately.');
+
+    // A second style configured for queue processing should not generate
+    // immediately, but should land on the queue for cron.
+    $queued_style = image_style_save(array(
+      'name' => 'isw_test_queue',
+      'label' => 'ISW Test Queue',
+      'effects' => array(),
+    ));
+    config_set('image_style_warmer.settings', 'warm_on_upload', array());
+    config_set('image_style_warmer.settings', 'warm_via_queue', array($queued_style['name']));
+
+    $file2 = $this->createPermanentImageFile();
+    $file2->status = FILE_STATUS_PERMANENT;
+    file_save($file2);
+
+    $queued_destination = image_style_path($queued_style['name'], $file2->uri);
+    $this->assertFalse(file_exists($queued_destination), 'Queue-warmed styles are not generated synchronously on upload.');
+
+    $queue = BackdropQueue::get('image_style_warmer_derivatives');
+    $this->assertEqual($queue->numberOfItems(), 1, 'Exactly one queue item was created for the queue-warmed style.');
+    $item = $queue->claimItem();
+    image_style_warmer_process_queue_item($item->data);
+    $queue->deleteItem($item);
+    $this->assertTrue(file_exists($queued_destination), 'Processing the queue item generates the derivative.');
+  }
+
+  public function testBulkActionUsesConfiguredWarming() {
+    config_set('image_style_warmer.settings', 'warm_on_upload', array($this->style['name']));
+    $file = $this->createPermanentImageFile();
+    $file->status = FILE_STATUS_PERMANENT;
+    file_save($file);
+
+    $destination = image_style_path($this->style['name'], $file->uri);
+    file_unmanaged_delete($destination);
+    $context = array();
+    image_style_warmer_warm_file_action($file, $context);
+
+    $this->assertTrue(file_exists($destination), 'The bulk action warms configured styles for a selected file.');
+  }
+
+  public function testImmediateAndQueuedStylesAreNotDuplicated() {
+    config_set('image_style_warmer.settings', 'warm_on_upload', array($this->style['name']));
+    config_set('image_style_warmer.settings', 'warm_via_queue', array($this->style['name']));
+    $file = $this->createPermanentImageFile();
+    $file->status = FILE_STATUS_PERMANENT;
+    file_save($file);
+
+    $queue = BackdropQueue::get('image_style_warmer_derivatives');
+    $this->assertEqual($queue->numberOfItems(), 0, 'A style warmed immediately is not also queued.');
+  }
+
+  public function testQueueWorkerLeavesFailedItemForRetry() {
+    $queue = BackdropQueue::get('image_style_warmer_derivatives');
+    $queue->createItem(array('style_name' => $this->style['name'], 'uri' => 'public://missing-isw-source.jpg'));
+    $item = $queue->claimItem();
+
+    try {
+      image_style_warmer_process_queue_item($item->data);
+      $this->fail('A failed derivative should raise an exception for queue retry.');
+    }
+    catch (Exception $e) {
+      $this->assertEqual($queue->numberOfItems(), 1, 'A failed queue item remains available for retry.');
+    }
+
+    $queue->releaseItem($item);
+    $queue->deleteItem($item);
+  }
+
+  public function testBulkActionIsRegistered() {
+    $action = actions_get_info('image_style_warmer_warm_file');
+    $this->assertEqual($action['type'], 'file', 'The warmer bulk action targets files.');
+    $this->assertEqual($action['callback'], 'image_style_warmer_warm_file_action', 'The warmer bulk action has the expected callback.');
+  }
+
+  public function testRebuildBatchOperation() {
+    $file = $this->createPermanentImageFile();
+    $file->status = FILE_STATUS_PERMANENT;
+    file_save($file);
+
+    $destination = image_style_path($this->style['name'], $file->uri);
+    $this->assertFalse(file_exists($destination), 'Derivative absent before rebuild.');
+
+    module_load_include('inc', 'image_style_warmer', 'image_style_warmer.admin');
+    $context = array();
+    do {
+      image_style_warmer_rebuild_batch_op($this->style, FALSE, $context);
+    } while (empty($context['finished']) || $context['finished'] != 1);
+
+    $this->assertTrue(file_exists($destination), 'Rebuild batch operation generates the missing derivative.');
+    $this->assertTrue($context['results']['processed'] >= 1, 'At least one file was processed by the rebuild batch.');
+    $this->assertEqual($context['results']['failed'], 0, 'No files failed during the rebuild batch.');
+  }
+
+  public function testSettingsFormSavesStyleLists() {
+    $account = $this->backdropCreateUser(array('administer image styles'));
+    $this->backdropLogin($account);
+
+    $edit = array(
+      'warm_on_upload[' . $this->style['name'] . ']' => TRUE,
+      'skip_existing' => FALSE,
+    );
+    $this->backdropPost('admin/config/media/image-style-warmer', $edit, t('Save configuration'));
+
+    $this->assertEqual(config_get('image_style_warmer.settings', 'warm_on_upload'), array($this->style['name']), 'Checked style saved into warm_on_upload.');
+    $this->assertIdentical(config_get('image_style_warmer.settings', 'skip_existing'), FALSE, 'Unchecked skip_existing saved as FALSE.');
+  }
+}

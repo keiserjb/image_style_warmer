@@ -1,0 +1,5 @@
+[ImageStyleWarmerTestCase]
+name = Image Style Warmer
+description = Tests on-upload warming, the rebuild batch, and the settings form.
+group = Image Style Warmer
+file = image_style_warmer.test

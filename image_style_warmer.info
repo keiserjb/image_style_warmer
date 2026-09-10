@@ -1,0 +1,6 @@
+type = module
+name = Image Style Warmer
+description = Pre-generates image style derivatives on upload and rebuilds existing derivatives on demand, using any stream wrapper (public, private, S3, etc).
+backdrop = 1.x
+dependencies[] = image
+configure = admin/config/media/image-style-warmer

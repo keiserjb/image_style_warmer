@@ -1,0 +1,13 @@
+<?php
+
+/**
+ * @file
+ * Install and uninstall functions for image_style_warmer.
+ */
+
+/**
+ * Implements hook_uninstall().
+ */
+function image_style_warmer_uninstall() {
+  config('image_style_warmer.settings')->delete();
+}

@@ -1,0 +1,6 @@
+{
+  "_config_name": "image_style_warmer.settings",
+  "warm_on_upload": [],
+  "warm_via_queue": [],
+  "skip_existing": true
+}

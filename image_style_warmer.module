@@ -1,0 +1,219 @@
+<?php
+/**
+ * @file
+ * Pre-generates and rebuilds image style derivatives.
+ *
+ * Backdrop core can only flush (delete) image style derivatives; nothing
+ * regenerates them until a browser happens to request the missing file. This
+ * module fills that gap by generating derivatives immediately or in the
+ * background on upload, and by providing an explicit rebuild action for
+ * derivatives that were flushed or never generated. All operations go
+ * through image_style_path()/image_style_create_derivative(), so they work
+ * with whatever stream wrapper a file actually uses (public, private, S3,
+ * etc.) without any wrapper-specific code here.
+ */
+
+/**
+ * Implements hook_config_info().
+ */
+function image_style_warmer_config_info() {
+  return array(
+    'image_style_warmer.settings' => array(
+      'label' => t('Image Style Warmer settings'),
+      'group' => t('Configuration'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function image_style_warmer_menu() {
+  $items = array();
+
+  $items['admin/config/media/image-style-warmer'] = array(
+    'title' => 'Image Style Warmer',
+    'description' => 'Choose which image styles are pre-generated on upload or rebuilt in the background.',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('image_style_warmer_settings_form'),
+    'access arguments' => array('administer image styles'),
+    'file' => 'image_style_warmer.admin.inc',
+  );
+  $items['admin/config/media/image-styles/rebuild'] = array(
+    'title' => 'Rebuild all styles',
+    'description' => 'Regenerate missing image style derivatives for every style.',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('image_style_warmer_rebuild_form'),
+    'access arguments' => array('administer image styles'),
+    'type' => MENU_LOCAL_ACTION,
+    'file' => 'image_style_warmer.admin.inc',
+  );
+  $items['admin/config/media/image-styles/rebuild/%image_style'] = array(
+    'title' => 'Rebuild style',
+    'description' => 'Regenerate missing derivatives for one image style.',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('image_style_warmer_rebuild_form', 5),
+    'access arguments' => array('administer image styles'),
+    'file' => 'image_style_warmer.admin.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_preprocess_HOOK() for theme_table().
+ *
+ * Adds a "Rebuild" link next to "Configure" in the image styles list's
+ * operations dropbutton, the same way contrib's image_styles_admin module
+ * adds its own "Duplicate" and "Flush" links.
+ */
+function image_style_warmer_preprocess_table(&$variables) {
+  if (empty($variables['rows'])) {
+    return;
+  }
+  foreach ($variables['rows'] as &$row) {
+    foreach ($row as $colnum => $column) {
+      if (!empty($column['data']['#type']) && $column['data']['#type'] === 'operations' && isset($column['data']['#links']['configure']['href'])) {
+        $row[$colnum]['data']['#links']['rebuild'] = array(
+          'title' => t('Rebuild'),
+          'href' => str_replace('configure', 'rebuild', $column['data']['#links']['configure']['href']),
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_file_insert().
+ */
+function image_style_warmer_file_insert($file) {
+  image_style_warmer_warm_file($file);
+}
+
+/**
+ * Implements hook_file_update().
+ *
+ * Widgets that use the managed_file element (the core image widget among
+ * them) upload a temporary file first and only mark it permanent when the
+ * parent entity is saved. Catch that transition here so upload-triggered
+ * warming still fires for the common case.
+ */
+function image_style_warmer_file_update($file) {
+  if (!empty($file->original) && (int) $file->original->status !== FILE_STATUS_PERMANENT && (int) $file->status === FILE_STATUS_PERMANENT) {
+    image_style_warmer_warm_file($file);
+  }
+}
+
+/**
+ * Generates or queues configured derivatives for a newly-permanent file.
+ */
+function image_style_warmer_warm_file($file) {
+  if ((int) $file->status !== FILE_STATUS_PERMANENT || strpos($file->filemime, 'image/') !== 0) {
+    return;
+  }
+
+  $config = config('image_style_warmer.settings');
+  $immediate = $config->get('warm_on_upload') ?: array();
+  $queued = $config->get('warm_via_queue') ?: array();
+  // A style warmed synchronously does not need a second queued pass.
+  $queued = array_diff($queued, $immediate);
+  if (empty($immediate) && empty($queued)) {
+    return;
+  }
+
+  $styles = image_styles();
+
+  foreach ($immediate as $style_name) {
+    if (isset($styles[$style_name])) {
+      image_style_warmer_create_derivative($styles[$style_name], $file->uri);
+    }
+  }
+
+  if (!empty($queued)) {
+    $queue = BackdropQueue::get('image_style_warmer_derivatives');
+    foreach ($queued as $style_name) {
+      if (isset($styles[$style_name])) {
+        $queue->createItem(array('style_name' => $style_name, 'uri' => $file->uri));
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_cron_queue_info().
+ */
+function image_style_warmer_cron_queue_info() {
+  $queues['image_style_warmer_derivatives'] = array(
+    'worker callback' => 'image_style_warmer_process_queue_item',
+    'time' => 60,
+  );
+  return $queues;
+}
+
+/**
+ * Queue worker for image_style_warmer_derivatives.
+ */
+function image_style_warmer_process_queue_item($item) {
+  $style = image_style_load($item['style_name']);
+  if (!$style) {
+    watchdog('image_style_warmer', 'Discarded queued derivative for missing image style @style.', array('@style' => $item['style_name']), WATCHDOG_WARNING);
+    return;
+  }
+  if (!image_style_warmer_create_derivative($style, $item['uri'])) {
+    // Throwing leaves the item in the queue for a later retry.
+    throw new Exception(t('Could not create the @style derivative for @uri.', array(
+      '@style' => $style['name'],
+      '@uri' => $item['uri'],
+    )));
+  }
+}
+
+/**
+ * Implements hook_action_info().
+ */
+function image_style_warmer_action_info() {
+  return array(
+    'image_style_warmer_warm_file' => array(
+      'label' => t('Warm configured image styles'),
+      'type' => 'file',
+      'callback' => 'image_style_warmer_warm_file_action',
+      'access callback' => 'user_access',
+      'access arguments' => array('administer image styles'),
+    ),
+  );
+}
+
+/**
+ * Action callback for warming a selected managed image file.
+ */
+function image_style_warmer_warm_file_action($file, &$context) {
+  image_style_warmer_warm_file($file);
+}
+
+/**
+ * Creates one image style derivative, skipping existing files by default.
+ *
+ * @param array $style
+ *   An image style array, as returned by image_style_load().
+ * @param string $uri
+ *   The source file URI, in whatever stream wrapper it actually lives in.
+ * @param bool $force
+ *   (optional) Regenerate even if the derivative already exists. Defaults to
+ *   the site-wide "Skip derivatives that already exist" setting.
+ *
+ * @return bool
+ *   TRUE if a derivative exists at the destination when this returns
+ *   (whether just generated or already present), FALSE on failure.
+ */
+function image_style_warmer_create_derivative($style, $uri, $force = NULL) {
+  if ($force === NULL) {
+    $force = config_get('image_style_warmer.settings', 'skip_existing') === FALSE;
+  }
+
+  $destination = image_style_path($style['name'], $uri);
+  if (!$force && file_exists($destination)) {
+    return TRUE;
+  }
+
+  return (bool) image_style_create_derivative($style, $uri, $destination);
+}
