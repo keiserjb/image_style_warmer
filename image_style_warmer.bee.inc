@@ -12,6 +12,7 @@ function image_style_warmer_bee_command() {
 
   $items['image_style_rebuild'] = array(
     'description' => bt('Rebuild image style derivatives for one style, or every style.'),
+    'callback' => 'bee_image_style_warmer_image_style_rebuild',
     'aliases' => array('isr'),
     'bootstrap' => BEE_BOOTSTRAP_FULL,
     'options' => array(
@@ -23,11 +24,16 @@ function image_style_warmer_bee_command() {
         'description' => bt('Regenerate derivatives even if they already exist.'),
         'value' => 'optional',
       ),
+      'limit' => array(
+        'description' => bt('Maximum number of image files to process for each style. Zero means no item limit.'),
+        'value' => 'optional',
+      ),
     ),
   );
 
   $items['image_style_queue_run'] = array(
     'description' => bt('Process queued image style derivatives.'),
+    'callback' => 'bee_image_style_warmer_image_style_queue_run',
     'aliases' => array('isqr'),
     'bootstrap' => BEE_BOOTSTRAP_FULL,
     'options' => array(
@@ -48,8 +54,8 @@ function image_style_warmer_bee_command() {
 /**
  * Validates bee_image_style_warmer_image_style_rebuild().
  */
-function bee_image_style_warmer_image_style_rebuild_validate() {
-  $style_name = bee_get_option('style');
+function bee_image_style_warmer_image_style_rebuild_validate($arguments = array(), $options = array()) {
+  $style_name = !empty($options['style']) ? $options['style'] : NULL;
   if ($style_name && !image_style_load($style_name)) {
     return bee_set_error('IMAGE_STYLE_WARMER_UNKNOWN_STYLE', bt('Unknown image style: @style', array('@style' => $style_name)));
   }
@@ -58,9 +64,15 @@ function bee_image_style_warmer_image_style_rebuild_validate() {
 /**
  * Rebuilds image style derivatives from the command line.
  */
-function bee_image_style_warmer_image_style_rebuild() {
-  $style_name = bee_get_option('style');
-  $force = (bool) bee_get_option('force');
+function bee_image_style_warmer_image_style_rebuild($arguments = array(), $options = array()) {
+  $style_name = !empty($options['style']) ? $options['style'] : NULL;
+  $force = !empty($options['force']);
+  $limit = isset($options['limit']) ? max(0, (int) $options['limit']) : 0;
+
+  if ($style_name && !image_style_load($style_name)) {
+    bee_message(bt('Unknown image style: @style', array('@style' => $style_name)), 'error');
+    return;
+  }
 
   $styles = $style_name ? array(image_style_load($style_name)) : image_styles();
 
@@ -74,7 +86,11 @@ function bee_image_style_warmer_image_style_rebuild() {
     $last_fid = 0;
 
     do {
-      $result = db_query_range("SELECT fid, uri FROM {file_managed} WHERE status = :status AND filemime LIKE :mime AND fid > :last_fid ORDER BY fid ASC", 0, 50, array(
+      $range = $limit ? min(50, $limit - $processed - $failed) : 50;
+      if ($range <= 0) {
+        break;
+      }
+      $result = db_query_range("SELECT fid, uri FROM {file_managed} WHERE status = :status AND filemime LIKE :mime AND fid > :last_fid ORDER BY fid ASC", 0, $range, array(
         ':status' => FILE_STATUS_PERMANENT,
         ':mime' => 'image/%',
         ':last_fid' => $last_fid,
@@ -91,9 +107,9 @@ function bee_image_style_warmer_image_style_rebuild() {
           $failed++;
         }
       }
-    } while ($count > 0);
+    } while ($count > 0 && (!$limit || $processed + $failed < $limit));
 
-    bee_print(bt('@style: @processed processed, @failed failed.', array(
+    bee_message(bt('@style: @processed processed, @failed failed.', array(
       '@style' => $style['label'],
       '@processed' => $processed,
       '@failed' => $failed,
@@ -104,10 +120,10 @@ function bee_image_style_warmer_image_style_rebuild() {
 /**
  * Processes queued image style derivatives from the command line.
  */
-function bee_image_style_warmer_image_style_queue_run() {
-  $time = bee_get_option('time');
+function bee_image_style_warmer_image_style_queue_run($arguments = array(), $options = array()) {
+  $time = isset($options['time']) ? $options['time'] : NULL;
   $time = ($time === NULL || $time === '') ? 60 : max(1, (int) $time);
-  $limit = bee_get_option('limit');
+  $limit = isset($options['limit']) ? $options['limit'] : NULL;
   $limit = ($limit === NULL || $limit === '') ? 0 : max(0, (int) $limit);
 
   $queue = BackdropQueue::get('image_style_warmer_derivatives');
@@ -124,13 +140,13 @@ function bee_image_style_warmer_image_style_queue_run() {
     catch (Exception $e) {
       $queue->releaseItem($item);
       $failed++;
-      bee_print(bt('Queue item failed: @message', array('@message' => $e->getMessage())));
+      bee_message(bt('Queue item failed: @message', array('@message' => $e->getMessage())), 'error');
       // Do not immediately reclaim the same released item in this run.
       break;
     }
   }
 
-  bee_print(bt('Queue run complete: @processed processed, @failed failed.', array(
+  bee_message(bt('Queue run complete: @processed processed, @failed failed.', array(
     '@processed' => $processed,
     '@failed' => $failed,
   )));

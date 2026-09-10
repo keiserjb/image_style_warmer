@@ -95,8 +95,7 @@ class ImageStyleWarmerTestCase extends BackdropWebTestCase {
     $this->assertTrue(file_exists($queued_destination), 'Processing the queue item generates the derivative.');
   }
 
-  public function testBulkActionUsesConfiguredWarming() {
-    config_set('image_style_warmer.settings', 'warm_on_upload', array($this->style['name']));
+  public function testBulkActionWarmsAllStyles() {
     $file = $this->createPermanentImageFile();
     $file->status = FILE_STATUS_PERMANENT;
     file_save($file);
@@ -104,9 +103,36 @@ class ImageStyleWarmerTestCase extends BackdropWebTestCase {
     $destination = image_style_path($this->style['name'], $file->uri);
     file_unmanaged_delete($destination);
     $context = array();
-    image_style_warmer_warm_file_action($file, $context);
+    image_style_warmer_warm_all_file_action($file, $context);
 
-    $this->assertTrue(file_exists($destination), 'The bulk action warms configured styles for a selected file.');
+    $this->assertTrue(file_exists($destination), 'The bulk action warms every image style for a selected file.');
+  }
+
+  public function testBulkActionExecutesThroughActionsApi() {
+    $account = $this->backdropCreateUser(array('administer image styles'));
+    $this->backdropLogin($account);
+    $file = $this->createPermanentImageFile();
+    $file->status = FILE_STATUS_PERMANENT;
+    file_save($file);
+
+    $destination = image_style_path($this->style['name'], $file->uri);
+    file_unmanaged_delete($destination);
+    $context = array();
+    $result = actions_execute('image_style_warmer_warm_file', $file, $context);
+
+    $this->assertIdentical(TRUE, $result, 'The registered file action executes through the Actions API.');
+    $this->assertTrue(file_exists($destination), 'The Actions API execution creates the all-styles derivative.');
+  }
+
+  public function testBulkActionReportsDerivativeFailure() {
+    $file = new File(array(
+      'uri' => 'public://isw-missing-source.jpg',
+      'filemime' => 'image/jpeg',
+      'status' => FILE_STATUS_PERMANENT,
+    ));
+    $context = array();
+
+    $this->assertFalse(image_style_warmer_warm_all_file_action($file, $context), 'The bulk action reports a failed derivative instead of claiming success.');
   }
 
   public function testImmediateAndQueuedStylesAreNotDuplicated() {
@@ -140,7 +166,7 @@ class ImageStyleWarmerTestCase extends BackdropWebTestCase {
   public function testBulkActionIsRegistered() {
     $action = actions_get_info('image_style_warmer_warm_file');
     $this->assertEqual($action['type'], 'file', 'The warmer bulk action targets files.');
-    $this->assertEqual($action['callback'], 'image_style_warmer_warm_file_action', 'The warmer bulk action has the expected callback.');
+    $this->assertEqual($action['callback'], 'image_style_warmer_warm_all_file_action', 'The warmer bulk action has the expected callback.');
   }
 
   public function testRebuildBatchOperation() {
