@@ -109,7 +109,7 @@ function image_style_warmer_file_update($file) {
  */
 function image_style_warmer_warm_file($file) {
   if ((int) $file->status !== FILE_STATUS_PERMANENT || strpos($file->filemime, 'image/') !== 0) {
-    return;
+    return FALSE;
   }
 
   $config = config('image_style_warmer.settings');
@@ -118,14 +118,22 @@ function image_style_warmer_warm_file($file) {
   // A style warmed synchronously does not need a second queued pass.
   $queued = array_diff($queued, $immediate);
   if (empty($immediate) && empty($queued)) {
-    return;
+    return FALSE;
   }
 
   $styles = image_styles();
+  $attempted = FALSE;
+  $success = TRUE;
 
   foreach ($immediate as $style_name) {
     if (isset($styles[$style_name])) {
-      image_style_warmer_create_derivative($styles[$style_name], $file->uri);
+      $attempted = TRUE;
+      if (!image_style_warmer_create_derivative($styles[$style_name], $file->uri)) {
+        $success = FALSE;
+      }
+    }
+    else {
+      $success = FALSE;
     }
   }
 
@@ -133,10 +141,16 @@ function image_style_warmer_warm_file($file) {
     $queue = BackdropQueue::get('image_style_warmer_derivatives');
     foreach ($queued as $style_name) {
       if (isset($styles[$style_name])) {
+        $attempted = TRUE;
         $queue->createItem(array('style_name' => $style_name, 'uri' => $file->uri));
+      }
+      else {
+        $success = FALSE;
       }
     }
   }
+
+  return $attempted && $success;
 }
 
 /**
@@ -174,9 +188,9 @@ function image_style_warmer_process_queue_item($item) {
 function image_style_warmer_action_info() {
   return array(
     'image_style_warmer_warm_file' => array(
-      'label' => t('Warm configured image styles'),
+      'label' => t('Warm all image styles'),
       'type' => 'file',
-      'callback' => 'image_style_warmer_warm_file_action',
+      'callback' => 'image_style_warmer_warm_all_file_action',
       'access callback' => 'user_access',
       'access arguments' => array('administer image styles'),
     ),
@@ -186,8 +200,34 @@ function image_style_warmer_action_info() {
 /**
  * Action callback for warming a selected managed image file.
  */
-function image_style_warmer_warm_file_action($file, &$context) {
-  image_style_warmer_warm_file($file);
+function image_style_warmer_warm_all_file_action($file, &$context) {
+  $success = image_style_warmer_warm_all_file($file);
+  if (!$success) {
+    watchdog('image_style_warmer', 'Could not warm all image styles for @uri. Check the source file and image style configuration.', array('@uri' => $file->uri), WATCHDOG_WARNING);
+  }
+  return $success;
+}
+
+/**
+ * Generates every defined image style for a permanent image file.
+ */
+function image_style_warmer_warm_all_file($file) {
+  if ((int) $file->status !== FILE_STATUS_PERMANENT || strpos($file->filemime, 'image/') !== 0) {
+    return FALSE;
+  }
+
+  $styles = image_styles();
+  if (empty($styles)) {
+    return FALSE;
+  }
+
+  $success = TRUE;
+  foreach ($styles as $style) {
+    if (!image_style_warmer_create_derivative($style, $file->uri)) {
+      $success = FALSE;
+    }
+  }
+  return $success;
 }
 
 /**
