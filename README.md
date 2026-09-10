@@ -39,9 +39,7 @@ derivative is not guaranteed to exist until cron has processed the queue.
 If cron is not running, queued derivatives remain pending. They can be run
 manually with:
 
-```bash
-bee image_style_queue_run
-```
+`bee image_style_queue_run`
 
 A style selected for immediate warming is automatically removed from the
 queued set for that upload, preventing duplicate work.
@@ -68,20 +66,12 @@ processed and failed files when it finishes.
 
 The command-line equivalent is:
 
-```bash
-# Rebuild every image style.
-bee image_style_rebuild
-
-# Rebuild one style by machine name.
-bee image_style_rebuild --style=thumbnail
-
-# Regenerate derivatives even when they already exist.
-bee image_style_rebuild --force
-bee image_style_rebuild --style=thumbnail --force
-
-# Process only one file for the style.
-bee image_style_rebuild --style=thumbnail --limit=1
-```
+- Rebuild every image style: `bee image_style_rebuild`
+- Rebuild one style by machine name: `bee image_style_rebuild --style=thumbnail`
+- Regenerate derivatives even when they already exist:
+  `bee image_style_rebuild --force` or
+  `bee image_style_rebuild --style=thumbnail --force`
+- Process only one file for the style: `bee image_style_rebuild --style=thumbnail --limit=1`
 
 The command is also available as `bee isr`.
 The rebuild command accepts `--limit` per style; zero or an omitted value means
@@ -92,19 +82,10 @@ that all matching permanent image files are processed.
 The queue runner processes items that were created by the background upload
 setting or by the bulk action:
 
-```bash
-# Process for up to 60 seconds with no item limit.
-bee image_style_queue_run
-
-# Process for up to two minutes.
-bee image_style_queue_run --time=120
-
-# Process at most 500 items.
-bee image_style_queue_run --limit=500
-
-# Apply both limits.
-bee isqr --time=120 --limit=500
-```
+- Process for up to 60 seconds with no item limit: `bee image_style_queue_run`
+- Process for up to two minutes: `bee image_style_queue_run --time=120`
+- Process at most 500 items: `bee image_style_queue_run --limit=500`
+- Apply both limits: `bee isqr --time=120 --limit=500`
 
 If derivative creation fails, the item remains available for a later retry.
 The command reports the number of processed and failed items. A missing image
